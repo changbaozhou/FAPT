@@ -133,4 +133,8 @@ output/
 debug.sh
 logs/
 *.log   
-dataset/
+*dataset/
+*.txt
+.vscode/
+
+dataset
