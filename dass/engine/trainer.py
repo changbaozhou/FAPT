@@ -18,8 +18,8 @@ from dass.utils import (
 )
 from dass.modeling import build_head, build_backbone
 from dass.evaluation import build_evaluator
-from attack.attackFeature import PGD
-from attack.purification import super_resolution
+# from attack.attackFeature import PGD
+# from attack.purification import super_resolution
 import clip
 from torch import randperm
 import os
@@ -160,7 +160,7 @@ class TrainerBase:
     def resume_model_if_exist(self, directory):
         names = self.get_model_names()
         file_missing = False
-
+        print(names)
         for name in names:
             path = osp.join(directory, name)
             if not osp.exists(path):
@@ -252,20 +252,31 @@ class TrainerBase:
         else:
             self._writer.add_scalar(tag, scalar_value, global_step)
 
-    def train(self, start_epoch, max_epoch, path=None, adv_training=False):
+    def train(self, start_epoch, max_epoch):
         """Generic training loops."""
         self.start_epoch = start_epoch
         self.max_epoch = max_epoch
 
-        # self.before_train()
-        if adv_training:
-            self.before_adv_train(path=path)
+        self.before_train()
+
+
         for self.epoch in range(self.start_epoch, self.max_epoch):
             self.before_epoch()
-            if adv_training:
-                self.run_epoch_adv()
-            else:
-                self.run_epoch()
+            self.run_epoch()
+            self.after_epoch()
+        self.after_train()
+
+    def train_fa(self, start_epoch, max_epoch):
+        """Generic training loops."""
+        self.start_epoch = start_epoch
+        self.max_epoch = max_epoch
+
+        self.before_train()
+
+
+        for self.epoch in range(self.start_epoch, self.max_epoch):
+            self.before_epoch()
+            self.run_epoch_fa()
             self.after_epoch()
         self.after_train()
 
@@ -284,11 +295,14 @@ class TrainerBase:
 
     def run_epoch(self):
         raise NotImplementedError
-
-    def run_epoch_adv(self):
+    
+    def run_epoch_fa(self):
         raise NotImplementedError
 
     def test(self):
+        raise NotImplementedError
+    
+    def test_fa(self):
         raise NotImplementedError
 
     def parse_batch_train(self, batch):
@@ -300,10 +314,10 @@ class TrainerBase:
     def forward_backward(self, batch):
         raise NotImplementedError
 
-    def forward_backward_adv(self, batch_dict):
+    def model_inference(self, input):
         raise NotImplementedError
 
-    def model_inference(self, input):
+    def model_inference_fa(self, input):
         raise NotImplementedError
 
     def model_zero_grad(self, names=None):
@@ -396,14 +410,12 @@ class SimpleTrainer(TrainerBase):
         self.test_loader = dm.test_loader
 
         # optional
-        self.adv = 'notransform_noshuffle'
         batch_size = self.cfg.DATALOADER.TRAIN_X.BATCH_SIZE
-        dm = DataManager(self.cfg, batch_size, self.adv)
+        dm = DataManager(self.cfg, batch_size)
         self.train_loader_x_notransform_noshuffle = dm.train_loader_x
 
-        self.adv = 'noshuffle'
         batch_size = self.cfg.DATALOADER.TRAIN_X.BATCH_EMBEDDING_SIZE
-        dm = DataManager(self.cfg, batch_size, self.adv)
+        dm = DataManager(self.cfg, batch_size)
         self.train_loader_x_noshuffle = dm.train_loader_x
 
         self.num_classes = dm.num_classes
@@ -437,8 +449,11 @@ class SimpleTrainer(TrainerBase):
             print(f"Detected {device_count} GPUs (use nn.DataParallel)")
             self.model = nn.DataParallel(self.model)
 
-    def train(self, adv_training=False):
-        super().train(self.start_epoch, self.max_epoch, adv_training)
+    def train(self):
+        super().train(self.start_epoch, self.max_epoch)
+
+    def train_fa(self):
+        super().train_fa(self.start_epoch, self.max_epoch)
 
     def before_train(self):
         directory = self.cfg.OUTPUT_DIR
@@ -454,103 +469,28 @@ class SimpleTrainer(TrainerBase):
         # Remember the starting time (for computing the elapsed time)
         self.time_start = time.time()
 
-    def before_adv_train(self, path, attack='PGD'):
-        pkl_path = '{}/{}_{}.pkl'.format(path, self.cfg.DATASET.NAME, self.cfg.MODEL.BACKBONE.NAME.replace(
-                                                                         "/",
-                                                                         "_"))
-        if os.path.isfile(pkl_path):
-            self.train_pkl = torch.load(pkl_path).to('cpu')
-            print('loaded train_pkl')
-            return
-        train_eps = self.cfg.DATASET.TRAIN_EPS
-        normalize = transforms.Normalize([0.48145466, 0.4578275, 0.40821073], [0.26862954, 0.26130258, 0.27577711])
-        clip_model, _ = clip.load(self.cfg.MODEL.BACKBONE.NAME, device='cpu')
-        surrogate = ClipModel(model=get_model(clip_model.visual), num_classes=2).eval().to(self.device)
 
-        if attack == 'PGD':
-            attacker = PGD(train_eps / 255., preprocess=normalize, num_iters=10)
-        else:
-            attacker = None
 
-        embedding_dim = surrogate.fc.in_features
-        self.train_pkl = torch.empty(size=[len(self.train_loader_x_notransform_noshuffle.dataset), embedding_dim])
-        for batch_idx, batch in enumerate(self.train_loader_x_notransform_noshuffle):
-            inputs = batch['img'].to(self.device)
-            images_adv = attacker.run(surrogate, inputs, scaler=1, feature_layer='fc')
-            assert torch.max(images_adv - inputs) < (train_eps / 255. + 1e-6)
-            assert torch.min(images_adv - inputs) > (-train_eps / 255 - 1e-6)
-            images_adv = normalize(images_adv)
-            with torch.no_grad():
-                embedding = clip_model.encode_image(images_adv)
 
-            self.train_pkl[batch_idx * self.train_loader_x_notransform_noshuffle.batch_size: (
-                                                                                                         batch_idx + 1) * self.train_loader_x_notransform_noshuffle.batch_size] = embedding.cpu()
-
-        torch.save(self.train_pkl, pkl_path)
-        print('generated train_pkl')
-        del surrogate
-        torch.cuda.empty_cache()
-
-    def before_adv_test(self, path, attack='PGD'):
-        pkl_path = '{}/{}_{}_{}.pkl'.format(path, self.cfg.DATASET.NAME, self.cfg.MODEL.BACKBONE.NAME.replace("/", "_"),
-                                                                              attack)
-        mean_value, std_value = [0.48145466, 0.4578275, 0.40821073], [0.26862954, 0.26130258, 0.27577711]
-        mean = torch.tensor(mean_value).view(-1, 1, 1).to(self.device)
-        std = torch.tensor(std_value).view(-1, 1, 1).to(self.device)
-        normalize = transforms.Normalize(mean_value, std_value)
-        self.mean, self.std = mean, std
-        if os.path.isfile(pkl_path):
-            self.test_pkl = torch.load(pkl_path)
-            return
-        self.test_pkl = torch.empty(size=[len(self.test_loader.dataset), 3, 224, 224])
-        test_eps = self.cfg.DATASET.TEST_EPS
-
-        if attack == 'PGD':
-            temp_model, _ = clip.load(self.cfg.MODEL.BACKBONE.NAME, device='cpu')
-            surrogate = ClipModel(model=get_model(temp_model.visual), num_classes=2).eval().to(self.device)
-            attacker = PGD(test_eps / 255., preprocess=normalize, num_iters=40)
-            for batch_idx, batch in enumerate(self.test_loader):
-                inputs = batch['img'].to(self.device)
-                inputs *= std
-                inputs += mean
-                images_adv = attacker.run(surrogate, inputs, scaler=1, feature_layer='fc')
-                assert torch.max(images_adv - inputs) < (test_eps / 255. + 1e-6)
-                assert torch.min(images_adv - inputs) > (-test_eps / 255 - 1e-6)
-                images_adv = normalize(images_adv)
-                self.test_pkl[batch_idx * self.test_loader.batch_size: (batch_idx + 1) * self.test_loader.batch_size] = images_adv.cpu()
-            torch.save(self.test_pkl, pkl_path)
-            del surrogate
-
-        else:
-            raise NameError
-        torch.cuda.empty_cache()
-
-    def before_black_test(self, path, attack='RAP'):
-        pkl_path = '{}/{}_{}.pkl'.format(path, self.cfg.DATASET.NAME, attack)
-        mean_value, std_value = [0.48145466, 0.4578275, 0.40821073], [0.26862954, 0.26130258, 0.27577711]
-        mean = torch.tensor(mean_value).view(-1, 1, 1)
-        std = torch.tensor(std_value).view(-1, 1, 1)
-        normalize = transforms.Normalize(mean_value, std_value)
-        self.mean, self.std = mean, std
-        if os.path.isfile(pkl_path):
-            self.test_pkl = torch.load(pkl_path)
-            self.test_pkl = (self.test_pkl - mean) / std
-            return
-        else:
-            raise NameError
-
-    def purify(self, baseline='super-resolution'):
-        if baseline == 'super-resolution':
-            inputs = self.test_pkl
-            mean, std = self.mean.squeeze(0), self.std.squeeze(0)
-            outputs = super_resolution(inputs, mean, std)
-        else:
-            raise NameError
-
-        self.test_pkl = outputs.to(self.device)
 
     def after_train(self):
         print("Finish training")
+
+        # do_test = not self.cfg.TEST.NO_TEST
+        # if do_test:
+        #     if self.cfg.TEST.FINAL_MODEL == "best_val":
+        #         print("Deploy the model with the best val performance")
+        #         self.load_model(self.output_dir)
+        #     else:
+        #         print("Deploy the last-epoch model")
+        #     self.test()
+
+        # Show elapsed time
+        # elapsed = round(time.time() - self.time_start)
+        # elapsed = str(datetime.timedelta(seconds=elapsed))
+        # print(f"Elapsed: {elapsed}")
+
+        # Close writer
         self.close_writer()
 
     def after_epoch(self):
@@ -576,51 +516,7 @@ class SimpleTrainer(TrainerBase):
         if meet_checkpoint_freq or last_epoch:
             self.save_model(self.epoch, self.output_dir)
 
-    @torch.no_grad()
-    def test_adv(self, split=None):
-        """A generic testing pipeline."""
-        self.set_model_mode("eval")
-        self.evaluator.reset()
 
-        if split is None:
-            split = self.cfg.TEST.SPLIT
-
-        if split == "val" and self.val_loader is not None:
-            data_loader = self.val_loader
-        else:
-            split = "test"  # in case val_loader is None
-            data_loader = self.test_loader
-
-        array_to_pkl = self.test_pkl
-        mean = torch.tensor([0.48145466, 0.4578275, 0.40821073]).view(-1, 1, 1).to(self.device)
-        std = torch.tensor([0.26862954, 0.26130258, 0.27577711]).view(-1, 1, 1).to(self.device)
-
-        print(f"Evaluate on the *{split}* set")
-        for batch_idx, batch in enumerate(tqdm(data_loader)):
-            input, label = self.parse_batch_test(batch)
-            input_adv = array_to_pkl[batch_idx * data_loader.batch_size: (batch_idx + 1) * data_loader.batch_size]
-            input_adv = input_adv.to(input.device)
-
-            # claim small noise
-            x_adv = input_adv*std + mean
-            x = input*std + mean
-            noise = x_adv-x
-            noise = torch.clamp(noise, -16 / 255.0, 16/255.0)
-            x_adv = x+noise
-            x_adv = torch.clamp(x_adv, 0, 1)
-            assert (torch.max(x_adv - x) < (16/255.0 + 1e-6))
-            assert (torch.min(x_adv - x) > (-16 / 255.0 - 1e-6))
-            input_adv = (x_adv-mean)/std
-
-            output = self.model_inference(input_adv)
-            self.evaluator.process(output, label.to(input.device))
-
-        results = self.evaluator.evaluate()
-        for k, v in results.items():
-            tag = f"{split}/{k}"
-            self.write_scalar(tag, v, self.epoch)
-
-        return list(results.values())[0]
 
     @torch.no_grad()
     def test(self, split=None):
@@ -642,6 +538,35 @@ class SimpleTrainer(TrainerBase):
         for batch_idx, batch in enumerate(tqdm(data_loader)):
             input, label = self.parse_batch_test(batch)
             output = self.model_inference(input)
+            self.evaluator.process(output, label)
+
+        results = self.evaluator.evaluate()
+
+        for k, v in results.items():
+            tag = f"{split}/{k}"
+            self.write_scalar(tag, v, self.epoch)
+
+        return list(results.values())[0]
+
+    def test_fa(self, split=None):
+        """A generic testing pipeline under faults."""
+        self.set_model_mode("eval")
+        self.evaluator.reset()
+
+        if split is None:
+            split = self.cfg.TEST.SPLIT
+
+        if split == "val" and self.val_loader is not None:
+            data_loader = self.val_loader
+        else:
+            split = "test"  # in case val_loader is None
+            data_loader = self.test_loader
+
+        print(f"Evaluate on the *{split}* set")
+
+        for batch_idx, batch in enumerate(tqdm(data_loader)):
+            input, label = self.parse_batch_test(batch)
+            output = self.model_inference_fa(input)
             self.evaluator.process(output, label)
 
         results = self.evaluator.evaluate()
@@ -770,6 +695,7 @@ class TrainerX(SimpleTrainer):
         data_time = AverageMeter()
         self.num_batches = len(self.train_loader_x)
 
+
         # mean = torch.tensor([0.48145466, 0.4578275, 0.40821073]).view(-1, 1, 1).to(self.device)
         # std = torch.tensor([0.26862954, 0.26130258, 0.27577711]).view(-1, 1, 1).to(self.device)
         # normalize = transforms.Normalize([0.48145466, 0.4578275, 0.40821073], [0.26862954, 0.26130258, 0.27577711])
@@ -812,35 +738,18 @@ class TrainerX(SimpleTrainer):
 
             end = time.time()
 
-    def run_adv_training(self):
+    def run_epoch_fa(self):
         self.set_model_mode("train")
         losses = MetricMeter()
         batch_time = AverageMeter()
         data_time = AverageMeter()
         self.num_batches = len(self.train_loader_x)
-        mean = torch.tensor([0.48145466, 0.4578275, 0.40821073]).view(-1, 1, 1).to(self.device)
-        std = torch.tensor([0.26862954, 0.26130258, 0.27577711]).view(-1, 1, 1).to(self.device)
 
-        train_eps = self.cfg.DATASET.TRAIN_EPS
-        normalize = transforms.Normalize([0.48145466, 0.4578275, 0.40821073], [0.26862954, 0.26130258, 0.27577711])
-        # clip_model, _ = clip.load(self.cfg.MODEL.BACKBONE.NAME, device='cpu')
-        surrogate = ClipModel(model=self.model.image_encoder, num_classes=2).eval().to(self.device)
-        attacker = PGD(train_eps / 255., preprocess=normalize, num_iters=10)
 
         end = time.time()
         for self.batch_idx, batch in enumerate(self.train_loader_x):
             data_time.update(time.time() - end)
-            inputs = batch['img'].to(self.device)
-            inputs *= std
-            inputs += mean
-            self.model.image_encoder.eval()
-            images_adv = attacker.run(surrogate, inputs, scaler=1, feature_layer='fc')
-            self.model.image_encoder.train()
-            assert torch.max(images_adv - inputs) < (train_eps / 255. + 1e-6)
-            assert torch.min(images_adv - inputs) > (-train_eps / 255 - 1e-6)
-            images_adv = normalize(images_adv)
-            batch['img'] = images_adv
-            loss_summary = self.forward_backward(batch)
+            loss_summary = self.forward_backward_fa(batch)
             batch_time.update(time.time() - end)
             losses.update(loss_summary)
 
@@ -872,63 +781,7 @@ class TrainerX(SimpleTrainer):
 
             end = time.time()
 
-    def run_epoch_adv(self):
-        self.set_model_mode("train")
-        losses = MetricMeter()
-        batch_time = AverageMeter()
-        data_time = AverageMeter()
-        # self.num_batches = len(self.train_loader_x)
-        self.num_batches = len(self.train_loader_x_noshuffle)
 
-        seed = torch.random.seed()
-        torch.random.manual_seed(seed)
-
-        # shuffle
-        length = randperm(len(self.train_loader_x_noshuffle.dataset.data_source)).tolist()
-        self.train_loader_x_noshuffle.dataset.data_source = [self.train_loader_x_noshuffle.dataset.data_source[i] for i
-                                                             in length]
-        self.train_pkl = self.train_pkl[torch.LongTensor(length)]
-
-        end = time.time()
-        for self.batch_idx, batch in enumerate(self.train_loader_x_noshuffle):
-
-            data_time.update(time.time() - end)
-
-            images_adv = self.train_pkl[self.batch_idx * self.train_loader_x_noshuffle.batch_size: (
-                                                                                                           self.batch_idx + 1) * self.train_loader_x_noshuffle.batch_size]
-            batch_dict = {'batch': batch, 'images_adv': images_adv.to(self.device)}
-
-            loss_summary = self.forward_backward_adv(batch_dict)
-            batch_time.update(time.time() - end)
-            losses.update(loss_summary)
-
-            meet_freq = (self.batch_idx + 1) % self.cfg.TRAIN.PRINT_FREQ == 0
-            only_few_batches = self.num_batches < self.cfg.TRAIN.PRINT_FREQ
-            if meet_freq or only_few_batches:
-                nb_remain = 0
-                nb_remain += self.num_batches - self.batch_idx - 1
-                nb_remain += (
-                                     self.max_epoch - self.epoch - 1
-                             ) * self.num_batches
-                eta_seconds = batch_time.avg * nb_remain
-                eta = str(datetime.timedelta(seconds=int(eta_seconds)))
-
-                info = []
-                info += [f"epoch [{self.epoch + 1}/{self.max_epoch}]"]
-                info += [f"batch [{self.batch_idx + 1}/{self.num_batches}]"]
-                info += [f"time {batch_time.val:.3f} ({batch_time.avg:.3f})"]
-                info += [f"data {data_time.val:.3f} ({data_time.avg:.3f})"]
-                info += [f"{losses}"]
-                info += [f"lr {self.get_current_lr():.4e}"]
-                info += [f"eta {eta}"]
-                print(" ".join(info))
-
-            n_iter = self.epoch * self.num_batches + self.batch_idx
-            for name, meter in losses.meters.items():
-                self.write_scalar("train/" + name, meter.avg, n_iter)
-            self.write_scalar("train/lr", self.get_current_lr(), n_iter)
-
-            end = time.time()
 
     def parse_batch_train(self, batch):
         input = batch["img"]

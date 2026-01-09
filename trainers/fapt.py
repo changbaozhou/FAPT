@@ -18,6 +18,7 @@ from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
 _tokenizer = _Tokenizer()
 
 
+
 # CUSTOM_TEMPLATES = {
 #     "OxfordPets": "a photo of a {}, a type of pet.",
 #     "OxfordFlowers": "a photo of a {}, a type of flower.",
@@ -82,8 +83,8 @@ class PromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
         super().__init__()
         n_cls = len(classnames)
-        n_ctx = cfg.TRAINER.ADV.N_CTX
-        ctx_init = cfg.TRAINER.ADV.CTX_INIT
+        n_ctx = cfg.TRAINER.FA.N_CTX
+        ctx_init = cfg.TRAINER.FA.CTX_INIT
         dtype = clip_model.dtype
         ctx_dim = clip_model.ln_final.weight.shape[0]
         clip_imsize = clip_model.visual.input_resolution
@@ -102,7 +103,7 @@ class PromptLearner(nn.Module):
 
         else:
             # random initialization
-            if cfg.TRAINER.ADV.CSC:
+            if cfg.TRAINER.FA.CSC:
                 print("Initializing class-specific contexts")
                 ctx_vectors = torch.empty(n_cls, n_ctx, ctx_dim, dtype=dtype)
             else:
@@ -134,7 +135,7 @@ class PromptLearner(nn.Module):
         self.n_ctx = n_ctx
         self.tokenized_prompts = tokenized_prompts  # torch.Tensor
         self.name_lens = name_lens
-        self.class_token_position = cfg.TRAINER.ADV.CLASS_TOKEN_POSITION
+        self.class_token_position = cfg.TRAINER.FA.CLASS_TOKEN_POSITION
 
 
     def forward(self):
@@ -204,7 +205,7 @@ class PromptLearner(nn.Module):
         return prompts
 
 
-class CustomCLIP(nn.Module):
+class FACLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
         super().__init__()
         self.prompt_learner = PromptLearner(cfg, classnames, clip_model)
@@ -213,6 +214,12 @@ class CustomCLIP(nn.Module):
         self.text_encoder = TextEncoder(clip_model)
         self.logit_scale = clip_model.logit_scale
         self.dtype = clip_model.dtype
+
+        """ MRFI """
+        
+        self.fi_image_encoder = None
+        self.fi_text_encoder = None
+        
 
 
     def forward(self, image):
@@ -230,14 +237,26 @@ class CustomCLIP(nn.Module):
 
 
         return logits
-
-    def forward_embedding(self, image_features):
-        """ original """
-        image_features = image_features.type(self.dtype)
+    
+    def foward_fa(self, image):
+        """ faward with fault injection """
         prompts = self.prompt_learner()
         tokenized_prompts = self.tokenized_prompts
-        text_features = self.text_encoder(prompts, tokenized_prompts)
 
+        if self.fi_image_encoder is not None:
+            image_features = self.fi_image_encoder(image.type(self.dtype))
+        else:
+            image_features = self.image_encoder(image.type(self.dtype))
+
+        if self.fi_text_encoder is not None:
+            x = prompts + self.fi_text_encoder.positional_embedding.type(self.dtype)
+            x = x.permute(1, 0, 2)  # NLD -> LND
+            x = self.fi_text_encoder(x)
+            x = x.permute(1, 0, 2)  # LND -> NLD
+            text_features = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.fi_text_encoder.text_projection
+        else:
+            text_features = self.text_encoder(prompts, tokenized_prompts)
+        
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
@@ -247,11 +266,15 @@ class CustomCLIP(nn.Module):
         return logits
 
 
+
+
+
+
 @TRAINER_REGISTRY.register()
 class FAPT(TrainerX):
 
     def check_cfg(self, cfg):
-        assert cfg.TRAINER.ADV.PREC in ["fp16", "fp32", "amp"]
+        assert cfg.TRAINER.FA.PREC in ["fp16", "fp32", "amp"]
 
     def build_model(self):
         cfg = self.cfg
@@ -260,12 +283,12 @@ class FAPT(TrainerX):
         print(f"Loading CLIP (backbone: {cfg.MODEL.BACKBONE.NAME})")
         clip_model = load_clip_to_cpu(cfg)
         
-        if cfg.TRAINER.ADV.PREC == "fp32" or cfg.TRAINER.ADV.PREC == "amp":
+        if cfg.TRAINER.FA.PREC == "fp32" or cfg.TRAINER.FA.PREC == "amp":
             # CLIP's default precision is fp16
             clip_model.float()
 
         print("Building custom CLIP")
-        self.model = CustomCLIP(cfg, classnames, clip_model)
+        self.model = FACLIP(cfg, classnames, clip_model)
 
         print("Turning off gradients in both the image and the text encoder")
         for name, param in self.model.named_parameters():
@@ -281,57 +304,21 @@ class FAPT(TrainerX):
         self.sched = build_lr_scheduler(self.optim, cfg.OPTIM)
         self.register_model("prompt_learner", self.model.prompt_learner, self.optim, self.sched)
 
-        self.scaler = GradScaler() if cfg.TRAINER.ADV.PREC == "amp" else None
+        self.scaler = GradScaler() if cfg.TRAINER.FA.PREC == "amp" else None
 
         # Note that multi-gpu training could be slow because CLIP's size is
         # big, which slows down the copy operation in DataParallel
-        device_count = torch.cuda.device_count()
-        if device_count > 1:
-            print(f"Multiple GPUs detected (n_gpus={device_count}), use all of them!")
-            self.model = nn.DataParallel(self.model)
 
-    def forward_backward_adv(self, batch_dict):
-        batch, embedding_adv = batch_dict['batch'], batch_dict['images_adv']
-        label = batch["label"].to(self.device)
+        # device_count = torch.cuda.device_count()
+        # if device_count > 1:
+        #     print(f"Multiple GPUs detected (n_gpus={device_count}), use all of them!")
+        #     self.model = nn.DataParallel(self.model)
 
-        output = self.model.forward_embedding(embedding_adv)
-        loss_adv = torch.nn.CrossEntropyLoss()(output, label)
-        loss = loss_adv
-        self.model_backward_and_update(loss)
-
-        loss_summary = {
-            "loss": loss.item(),
-            "acc": compute_accuracy(output, label)[0].item(),
-        }
-
-        if (self.batch_idx + 1) == self.num_batches:
-            self.update_lr()
-
-        return loss_summary
     
-    def forward_backward_fapt(self, batch_dict):
-        batch, embedding_adv = batch_dict['batch'], batch_dict['images_adv']
-        label = batch["label"].to(self.device)
-
-        output = self.model.forward_embedding(embedding_adv)
-        loss_adv = torch.nn.CrossEntropyLoss()(output, label)
-        loss = loss_adv
-        self.model_backward_and_update(loss)
-
-        loss_summary = {
-            "loss": loss.item(),
-            "acc": compute_accuracy(output, label)[0].item(),
-        }
-
-        if (self.batch_idx + 1) == self.num_batches:
-            self.update_lr()
-
-        return loss_summary
-
     def forward_backward(self, batch):
         image, label = self.parse_batch_train(batch)
 
-        prec = self.cfg.TRAINER.ADV.PREC
+        prec = self.cfg.TRAINER.FA.PREC
         if prec == "amp":
             with autocast():
                 output = self.model(image)
@@ -343,6 +330,51 @@ class FAPT(TrainerX):
         else:
             output = self.model(image)
             loss = F.cross_entropy(output, label)
+            self.model_backward_and_update(loss)
+
+        loss_summary = {
+            "loss": loss.item(),
+            "acc": compute_accuracy(output, label)[0].item(),
+        }
+
+        if (self.batch_idx + 1) == self.num_batches:
+            self.update_lr()
+
+        return loss_summary
+
+
+    def forward_backward_fa(self, batch):
+        image, label = self.parse_batch_train(batch)
+
+        prec = self.cfg.TRAINER.FA.PREC
+        if prec == "amp":
+            with autocast():
+                output_fa = self.model.forward_fa(image)
+                loss_fa = F.cross_entropy(output_fa, label)
+
+                # output_org = self.model(image)
+                # loss_org = F.cross_entropy(output_org, label)
+
+                # loss = loss_org + 0.1 * loss_fa
+                loss = loss_fa 
+
+            self.optim.zero_grad()
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optim)
+            self.scaler.update()
+        else:
+            output_fa = self.model.forward_fa(image)
+            loss_fa = F.cross_entropy(output_fa, label)
+
+            # output_org = self.model(image)
+            # loss_org = F.cross_entropy(output_org, label)
+
+            # loss = loss_org + 0.9 * loss_fa
+
+            loss = loss_fa 
+
+            output = output_fa
+
             self.model_backward_and_update(loss)
 
         loss_summary = {
@@ -395,3 +427,13 @@ class FAPT(TrainerX):
             print("Loading weights to {} " 'from "{}" (epoch = {})'.format(name, model_path, epoch))
             # set strict=False
             self._models[name].load_state_dict(state_dict, strict=False)
+    
+    def model_inference(self, image):
+
+        logits = self.model(image)
+        return logits
+
+    def model_inference_fa(self, image):
+
+        logits = self.model.forward_fa(image)
+        return logits
