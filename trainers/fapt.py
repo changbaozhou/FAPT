@@ -238,8 +238,8 @@ class FACLIP(nn.Module):
 
         return logits
     
-    def foward_fa(self, image):
-        """ faward with fault injection """
+    def forward_fa(self, image):
+        """ forward with fault injection """
         prompts = self.prompt_learner()
         tokenized_prompts = self.tokenized_prompts
 

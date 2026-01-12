@@ -1,3 +1,4 @@
+from email.mime import text
 import torch
 import torch.nn as nn
 
@@ -46,6 +47,8 @@ class ZeroshotCLIP(TrainerX):
         prompts = torch.cat([clip.tokenize(p) for p in prompts])
         prompts = prompts.to(self.device)
 
+
+
         with torch.no_grad():
             text_features = clip_model.encode_text(prompts)
             text_features = text_features / text_features.norm(dim=-1, keepdim=True)
@@ -53,9 +56,47 @@ class ZeroshotCLIP(TrainerX):
         self.text_features = text_features
         self.clip_model = clip_model
 
+        self.prompts = prompts
+
+        """ MRFI """
+        
+        self.fi_image_encoder = None
+        self.fi_text_encoder = None
+
     def model_inference(self, image):
         image_features = self.clip_model.encode_image(image)
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        logit_scale = self.clip_model.logit_scale.exp()
+        logits = logit_scale * image_features @ self.text_features.t()
+        return logits
+    
+    def model_inference_fa(self, image):
+
+        """ inference with fault injection """
+        if self.fi_image_encoder is not None:
+            image_features = self.fi_image_encoder(image.type(self.clip_model.dtype))
+        else:
+            image_features = self.clip_model.encode_image(image)
+
+        if self.fi_text_encoder is not None:
+
+            x = self.clip_model.token_embedding(self.prompts).type(self.clip_model.dtype)  # [batch_size, n_ctx, d_model]
+
+            x = x + self.clip_model.positional_embedding.type(self.clip_model.dtype)
+            x = x.permute(1, 0, 2)  # NLD -> LND
+            x = self.fi_text_encoder(x)
+            x = x.permute(1, 0, 2)  # LND -> NLD
+            x = self.clip_model.ln_final(x).type(self.clip_model.dtype)
+
+            # x.shape = [batch_size, n_ctx, transformer.width]
+            # take features from the eot embedding (eot_token is the highest number in each sequence)
+            text_features = x[torch.arange(x.shape[0]), self.prompts.argmax(dim=-1)] @ self.clip_model.text_projection
+        else:
+            text_features = self.clip_model.encode_text(self.prompts)
+
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
         logit_scale = self.clip_model.logit_scale.exp()
         logits = logit_scale * image_features @ self.text_features.t()
         return logits

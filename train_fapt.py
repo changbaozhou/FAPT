@@ -26,7 +26,7 @@ import datasets.imagenetv2
 import datasets.imagenet_a
 import datasets.imagenet_r
 
-import trainers.advpt
+import trainers.fapt
 import trainers.zsclip
 
 from mrfi import MRFI, EasyConfig
@@ -85,12 +85,12 @@ def extend_cfg(cfg):
     """
     from yacs.config import CfgNode as CN
 
-    cfg.TRAINER.ADV = CN()
-    cfg.TRAINER.ADV.N_CTX = 32  # number of context vectors
-    cfg.TRAINER.ADV.CSC = False  # class-specific context
-    cfg.TRAINER.ADV.CTX_INIT = ""  # initialization words
-    cfg.TRAINER.ADV.PREC = prec  # fp16, fp32, amp
-    cfg.TRAINER.ADV.CLASS_TOKEN_POSITION = "end"  # 'middle' or 'end' or 'front'
+    cfg.TRAINER.FA = CN()
+    cfg.TRAINER.FA.N_CTX = 32  # number of context vectors
+    cfg.TRAINER.FA.CSC = False  # class-specific context
+    cfg.TRAINER.FA.CTX_INIT = ""  # initialization words
+    cfg.TRAINER.FA.PREC = prec  # fp16, fp32, amp
+    cfg.TRAINER.FA.CLASS_TOKEN_POSITION = "end"  # 'middle' or 'end' or 'front'
 
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
     cfg.DATALOADER.TRAIN_X.BATCH_EMBEDDING_SIZE = 256
@@ -133,13 +133,14 @@ def main(args):
     if torch.cuda.is_available() and cfg.USE_CUDA:
         torch.backends.cudnn.benchmark = True
 
-    if not os.path.exists(args.path):
-        os.makedirs(args.path)
+    # if not os.path.exists(args.path):
+    #     os.makedirs(args.path)
+
     # print_args(args, cfg)
     # print("Collecting env info ...")
     # print("** System info **\n{}\n".format(collect_env_info()))
 
-    trainer = build_trainer(cfg)
+    # trainer = build_trainer(cfg)
 
     if args.eval_only:
         trainer = build_trainer(cfg)
@@ -149,9 +150,6 @@ def main(args):
         print('clean acc:')
         trainer.test()
         print('---------------------------------------------------')
-        # print('robust acc:')
-        # trainer.before_adv_test(args.path, args.white_attack)
-        # trainer.test_adv()
         return
     
     if args.eval_fault:
@@ -165,11 +163,20 @@ def main(args):
         print('acc under fault:')
         # for ber in [1e-8, 1e-7, 1e-6, 1e-5]:
         # for ber in [1e-6, 1e-5]:
-        for ber in [9e-2]:
+
+
+        fi_results = []
+
+        # component-wise fault injection
+
+
+        for ber in [1e-9,1e-8,1e-7,1e-6,1e-5,1e-4,1e-3,1e-2]:
+        # for ber in [1e-9]:
+
             image_encoder = trainer.clip_model.visual
             text_encoder = trainer.clip_model.transformer
             econfig = EasyConfig.load_file('easyconfigs/float_weight_fi.yaml')
-            econfig.set_error_mode(0, {'method':'FloatFixedBitFlip','bit':19,'floattype': 'float32'})
+
             econfig.faultinject[0]['selector']['rate'] = ber
             if args.fi_image_encoder:
                 fi_image_encoder = MRFI(copy.deepcopy(image_encoder), econfig)
@@ -182,23 +189,46 @@ def main(args):
                 fi_text_encoder = MRFI(copy.deepcopy(text_encoder), econfig)
                 trainer.fi_image_encoder = fi_image_encoder
                 trainer.fi_text_encoder = fi_text_encoder
+            
             print(f'bit error rate: {ber}')
-            trainer.test_fa()
+            acc = trainer.test_fa()
+            print(f'acc: {acc}')
+            print('--------------------------------')
+
+
+
+
+
+
+
             
         return
 
     if args.fa_training:
         trainer = build_trainer(cfg)
-        trainer.load_model(args.model_dir, epoch=args.load_epoch)
-        print(args.model_dir)
         print('---------------------------------------------------')
         print('clean acc:')
         trainer.test()
         print('---------------------------------------------------')
         print('begin fa prompt tuning:')
-        image_encoder = trainer.clip_model.visual
+
+        # if args.fapt_component:
+
+
+        # if args.fapt_layer:
+
+
+        # if args.fapt_bit:
+
+
+
+
+        image_encoder = trainer.model.image_encoder
         econfig = EasyConfig.load_file('easyconfigs/float_weight_fi.yaml')
-        econfig.set_error_mode(0, {'method':'FloatFixedBitFlip','bit':26,'floattype': 'float32'})
+        # econfig.set_error_mode(0, {'method':'FloatFixedBitFlip','bit':26,'floattype': 'float32'})
+        
+
+
         econfig.faultinject[0]['selector']['rate'] = 1e-5
         fi_image_encoder = MRFI(copy.deepcopy(image_encoder), econfig)
         trainer.fi_image_encoder = fi_image_encoder
@@ -209,7 +239,7 @@ def main(args):
         print('---------------------------------------------------')
         print('begin fault injection test:')
         for ber in [1e-7]:
-            image_encoder = trainer.clip_model.visual
+            image_encoder = trainer.model.image_encoder
             econfig = EasyConfig.load_file('easyconfigs/float_weight_fi.yaml')
             econfig.faultinject[0]['selector']['rate'] = ber
             fi_image_encoder = MRFI(copy.deepcopy(image_encoder), econfig)
@@ -218,14 +248,25 @@ def main(args):
             trainer.test_fa()   
 
         return
-    
-    elif not args.no_train:
+
+    if args.training:
         trainer = build_trainer(cfg)
         trainer.train()
+
         print('---------------------------------------------------')
         print('clean acc:')
-        trainer.test()      
-        return 
+        trainer.test()    
+
+        return
+
+    
+    # elif not args.no_train:
+    #     trainer = build_trainer(cfg)
+    #     trainer.train()
+    #     print('---------------------------------------------------')
+    #     print('clean acc:')
+    #     trainer.test()      
+    #     return 
 
 
         
@@ -239,6 +280,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=str, default="/home/bobzhou/dataset", help="path to dataset")
+    parser.add_argument("--training", action="store_true")
     parser.add_argument("--fa_training", action="store_true")
 
 
@@ -262,11 +304,15 @@ if __name__ == "__main__":
     parser.add_argument("--trainer", type=str, default="FAPT", help="name of trainer")
     parser.add_argument("--backbone", type=str, default="", help="name of CNN backbone")
     parser.add_argument("--head", type=str, default="", help="name of head")
-    parser.add_argument("--eval-only", action="store_true", help="evaluation only")
-    parser.add_argument("--eval-fault", action="store_true", help="evaluation under fault injection")
+    parser.add_argument("--eval_only", action="store_true", help="evaluation only")
+
+    parser.add_argument("--eval_fault", action="store_true", help="evaluation under fault injection")
+    parser.add_argument("--fi_image_encoder", action="store_true", help="evaluation under fault injection in image encoder")
+    parser.add_argument("--fi_text_encoder", action="store_true", help="evaluation under fault injection in text encoder")
+    parser.add_argument("--fi_both", action="store_true", help="evaluation under fault injection in both")
 
 
-    parser.add_argument("--eval-black", action="store_true", help="evaluation black-box attack")
+
 
     parser.add_argument(
         "--model-dir",

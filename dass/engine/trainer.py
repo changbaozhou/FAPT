@@ -580,6 +580,7 @@ class SimpleTrainer(TrainerBase):
     def model_inference(self, input):
         return self.model(input)
 
+
     def parse_batch_test(self, batch):
         input = batch["img"]
         label = batch["label"]

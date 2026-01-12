@@ -145,9 +145,9 @@ def main(args):
         print('clean acc:')
         trainer.test()
         print('---------------------------------------------------')
-        print('robust acc:')
-        trainer.before_adv_test(args.path, args.white_attack)
-        trainer.test_adv()
+        # print('robust acc:')
+        # trainer.before_adv_test(args.path, args.white_attack)
+        # trainer.test_adv()
         return
 
     elif args.eval_black:
