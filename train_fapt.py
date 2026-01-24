@@ -31,6 +31,9 @@ import trainers.zsclip
 
 from mrfi import MRFI, EasyConfig
 
+import pandas as pd
+
+
 # prec = 'fp16'
 prec = 'fp32'
 
@@ -153,47 +156,157 @@ def main(args):
         return
     
     if args.eval_fault:
+        results = []
         trainer = build_trainer(cfg)
         trainer.load_model(args.model_dir, epoch=args.load_epoch)
         print(args.model_dir)
-        print('---------------------------------------------------')
-        print('clean acc:')
-        trainer.test()
-        print('---------------------------------------------------')
+        # print('---------------------------------------------------')
+        # print('clean acc:')
+        # trainer.test()
+        # print('---------------------------------------------------')
         print('acc under fault:')
         # for ber in [1e-8, 1e-7, 1e-6, 1e-5]:
         # for ber in [1e-6, 1e-5]:
 
 
-        fi_results = []
-
+        
         # component-wise fault injection
 
+        if args.fi_component_wise:
 
-        for ber in [1e-9,1e-8,1e-7,1e-6,1e-5,1e-4,1e-3,1e-2]:
-        # for ber in [1e-9]:
 
-            image_encoder = trainer.clip_model.visual
-            text_encoder = trainer.clip_model.transformer
-            econfig = EasyConfig.load_file('easyconfigs/float_weight_fi.yaml')
+            for ber in [1e-9,1e-8,1e-7,1e-6,1e-5,1e-4,1e-3,1e-2]:
+            # for ber in [1e-9]:
 
-            econfig.faultinject[0]['selector']['rate'] = ber
-            if args.fi_image_encoder:
-                fi_image_encoder = MRFI(copy.deepcopy(image_encoder), econfig)
-                trainer.fi_image_encoder = fi_image_encoder
-            if args.fi_text_encoder:
-                fi_text_encoder = MRFI(copy.deepcopy(text_encoder), econfig)
-                trainer.fi_text_encoder = fi_text_encoder
-            if args.fi_both:
-                fi_image_encoder = MRFI(copy.deepcopy(image_encoder), econfig)
-                fi_text_encoder = MRFI(copy.deepcopy(text_encoder), econfig)
-                trainer.fi_image_encoder = fi_image_encoder
-                trainer.fi_text_encoder = fi_text_encoder
+                image_encoder = trainer.clip_model.visual
+                text_encoder = trainer.clip_model.transformer
+                econfig = EasyConfig.load_file('easyconfigs/float_weight_fi.yaml')
+
+                econfig.faultinject[0]['selector']['rate'] = ber
+                if args.fi_image_encoder:
+                    fi_image_encoder = MRFI(copy.deepcopy(image_encoder), econfig)
+                    trainer.fi_image_encoder = fi_image_encoder
+                    output_name = 'image_encoder'
+                if args.fi_text_encoder:
+                    fi_text_encoder = MRFI(copy.deepcopy(text_encoder), econfig)
+                    trainer.fi_text_encoder = fi_text_encoder
+                    output_name = 'text_encoder'
+                if args.fi_both:
+                    fi_image_encoder = MRFI(copy.deepcopy(image_encoder), econfig)
+                    fi_text_encoder = MRFI(copy.deepcopy(text_encoder), econfig)
+                    trainer.fi_image_encoder = fi_image_encoder
+                    trainer.fi_text_encoder = fi_text_encoder
+                    output_name = 'both'
+                
+                print(f'bit error rate: {ber}')
+                res = trainer.test_fa()
+                results.append((ber, res))
+                # save fi results to csv
+                df = pd.DataFrame(results, columns=['ber', 'acc'])
+                df.to_csv(f'resilience_component_wise_{output_name}.csv', index=False)
+
+
+
+        # layer -wise fault injection
+        if args.fi_layer_wise:
+
+            # for ber in [1e-9,1e-8,1e-7,1e-6,1e-5,1e-4,1e-3,1e-2]:
+            for ber in [1e-5]:
+                image_encoder = trainer.clip_model.visual
+                text_encoder = trainer.clip_model.transformer
+                econfig = EasyConfig.load_file('easyconfigs/float_weight_fi.yaml')
+
+                econfig.faultinject[0]['selector']['rate'] = ber
+
+
+                if args.fi_image_encoder:
+                    fi_image_encoder = MRFI(copy.deepcopy(image_encoder), econfig)
+                    cfg = fi_image_encoder.get_weights_configs()
+
+
+                    for layer in range(len(image_encoder.transformer.resblocks)+1):
+
+                        cfg.enabled = False 
+                        if layer == 0:
+                            cfg[layer].enabled = True
+                        else: 
+                            cfg[layer*3-2].enabled = True
+                            cfg[layer*3-1].enabled = True
+                            cfg[layer*3].enabled = True
+
+                        trainer.fi_image_encoder = fi_image_encoder
+                    
+
+                        print(f'bit error rate: {ber}, layer: {layer}')
+                        res = trainer.test_fa()
+                        results.append((ber, layer, res))
+                        df = pd.DataFrame(results, columns=['ber', 'layer', 'acc'])
+                        df.to_csv(f'resilience_layer_wise_image.csv', index=False)
+
+
+                
+                if args.fi_text_encoder:
+                    fi_text_encoder = MRFI(copy.deepcopy(text_encoder), econfig)
+                    cfg = fi_text_encoder.get_weights_configs()
+
+
+                    for layer in range(len(text_encoder.resblocks)):
+
+                        cfg.enabled = False 
+
+                        cfg[layer*3].enabled = True
+                        cfg[layer*3+1].enabled = True
+                        cfg[layer*3+2].enabled = True
+
+                        print(cfg.enabled)
+
+
+                        trainer.fi_text_encoder = fi_text_encoder
+                    
+
+                        print(f'bit error rate: {ber}, layer: {layer}')
+                        res = trainer.test_fa()
+                        results.append((ber, layer, res))
+                        df = pd.DataFrame(results, columns=['ber', 'layer', 'acc'])
+                        df.to_csv(f'resilience_layer_wise_text.csv', index=False)
+
+        # bit -wise fault injection
+        if args.fi_bit_wise:
             
-            print(f'bit error rate: {ber}')
-            acc = trainer.test_fa()
-            print(f'acc: {acc}')
-            print('--------------------------------')
+            # for ber in [1e-9,1e-8,1e-7,1e-6,1e-5,1e-4,1e-3,1e-2]:
+            for ber in [1e-5]:
+                image_encoder = trainer.clip_model.visual
+                text_encoder = trainer.clip_model.transformer
+                econfig = EasyConfig.load_file('easyconfigs/float_weight_fi.yaml')
+
+                econfig.faultinject[0]['selector']['rate'] = ber
+
+
+                if args.fi_image_encoder:
+                    for bit in range(32):
+                        econfig.set_error_mode(0, {'method':'FloatFixedBitFlip','bit':bit,'floattype': 'float32'})
+                        fi_image_encoder = MRFI(copy.deepcopy(image_encoder), econfig)
+                        trainer.fi_image_encoder = fi_image_encoder
+                    
+
+                        print(f'bit error rate: {ber}, bit: {bit}')
+                        res = trainer.test_fa()
+                        results.append((ber, bit, res))
+                        df = pd.DataFrame(results, columns=['ber', 'bit', 'acc'])
+                        df.to_csv(f'resilience_bit_wise_image.csv', index=False)
+                
+                if args.fi_text_encoder:
+                    for bit in range(32):
+                        econfig.set_error_mode(0, {'method':'FloatFixedBitFlip','bit':bit,'floattype': 'float32'})
+                        fi_text_encoder = MRFI(copy.deepcopy(text_encoder), econfig)
+                        trainer.fi_text_encoder = fi_text_encoder
+                    
+
+                        print(f'bit error rate: {ber}, bit: {bit}')
+                        res = trainer.test_fa()
+                        results.append((ber, bit, res))
+                        df = pd.DataFrame(results, columns=['ber', 'bit', 'acc'])
+                        df.to_csv(f'resilience_bit_wise_text.csv', index=False)
 
 
 
@@ -306,7 +419,13 @@ if __name__ == "__main__":
     parser.add_argument("--head", type=str, default="", help="name of head")
     parser.add_argument("--eval_only", action="store_true", help="evaluation only")
 
+
     parser.add_argument("--eval_fault", action="store_true", help="evaluation under fault injection")
+    parser.add_argument("--fi_component_wise", action="store_true", help="evaluation under fault injection")
+    parser.add_argument("--fi_layer_wise", action="store_true", help="evaluation under fault injection")
+    parser.add_argument("--fi_bit_wise", action="store_true", help="evaluation under fault injection")
+    
+
     parser.add_argument("--fi_image_encoder", action="store_true", help="evaluation under fault injection in image encoder")
     parser.add_argument("--fi_text_encoder", action="store_true", help="evaluation under fault injection in text encoder")
     parser.add_argument("--fi_both", action="store_true", help="evaluation under fault injection in both")
