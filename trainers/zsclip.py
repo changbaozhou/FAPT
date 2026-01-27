@@ -42,18 +42,37 @@ class ZeroshotCLIP(TrainerX):
         clip_model = clip_model.to(torch.float32)
 
         temp = CUSTOM_TEMPLATES[cfg.DATASET.NAME]
+        # 测试一下不同的prompt
+
+        # hep2
+        temp = "an image of a {}."
+
+        # none
+        # temp = "{}"
+
+        # alpha
+        # temp = "dfafakfjlajdff{}"
+
+        # numbers
+        # temp = "3232 3434 5698{}"
+
+
+
+
+
+
         prompts = [temp.format(c.replace("_", " ")) for c in classnames]
-        print(f"Prompts: {prompts}")
+        # print(f"Prompts: {prompts}")
         prompts = torch.cat([clip.tokenize(p) for p in prompts])
         prompts = prompts.to(self.device)
 
 
 
-        with torch.no_grad():
-            text_features = clip_model.encode_text(prompts)
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        # with torch.no_grad():
+        #     text_features = clip_model.encode_text(prompts)
+        #     text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
-        self.text_features = text_features
+        # self.text_features = text_features
         self.clip_model = clip_model
 
         self.prompts = prompts
@@ -63,11 +82,23 @@ class ZeroshotCLIP(TrainerX):
         self.fi_image_encoder = None
         self.fi_text_encoder = None
 
+    # def model_inference(self, image):
+    #     image_features = self.clip_model.encode_image(image)
+    #     image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+    #     logit_scale = self.clip_model.logit_scale.exp()
+    #     logits = logit_scale * image_features @ self.text_features.t()
+    #     return logits
+    
     def model_inference(self, image):
         image_features = self.clip_model.encode_image(image)
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+        with torch.no_grad():
+            text_features = self.clip_model.encode_text(self.prompts)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+
         logit_scale = self.clip_model.logit_scale.exp()
-        logits = logit_scale * image_features @ self.text_features.t()
+        logits = logit_scale * image_features @ text_features.t()
         return logits
     
     def model_inference_fa(self, image):
@@ -98,7 +129,7 @@ class ZeroshotCLIP(TrainerX):
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
 
         logit_scale = self.clip_model.logit_scale.exp()
-        logits = logit_scale * image_features @ self.text_features.t()
+        logits = logit_scale * image_features @ text_features.t()
         return logits
 
 

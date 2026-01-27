@@ -1,5 +1,7 @@
 import argparse
 import copy
+import gc
+import time
 import torch
 
 import os
@@ -145,6 +147,10 @@ def main(args):
 
     # trainer = build_trainer(cfg)
 
+    output_dir = args.output_dir
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
     if args.eval_only:
         trainer = build_trainer(cfg)
         trainer.load_model(args.model_dir, epoch=args.load_epoch)
@@ -175,35 +181,77 @@ def main(args):
         if args.fi_component_wise:
 
 
-            for ber in [1e-9,1e-8,1e-7,1e-6,1e-5,1e-4,1e-3,1e-2]:
+
+            # for ber in [1e-9,1e-8,1e-7,1e-6,1e-5,1e-4,1e-3,1e-2]:
+            for ber in [1e-9,1e-8,5e-8,1e-7,3e-7,5e-7,1e-6]:
             # for ber in [1e-9]:
 
                 image_encoder = trainer.clip_model.visual
                 text_encoder = trainer.clip_model.transformer
                 econfig = EasyConfig.load_file('easyconfigs/float_weight_fi.yaml')
-
                 econfig.faultinject[0]['selector']['rate'] = ber
+
+                print(f'bit error rate: {ber}')
+
+
                 if args.fi_image_encoder:
                     fi_image_encoder = MRFI(copy.deepcopy(image_encoder), econfig)
                     trainer.fi_image_encoder = fi_image_encoder
-                    output_name = 'image_encoder'
+                    output_name = 'image'
+
+                    res = trainer.test_fa()
+
+                    del trainer.fi_image_encoder
+                    trainer.fi_image_encoder = None
+                    del fi_image_encoder
+
                 if args.fi_text_encoder:
                     fi_text_encoder = MRFI(copy.deepcopy(text_encoder), econfig)
                     trainer.fi_text_encoder = fi_text_encoder
-                    output_name = 'text_encoder'
+                    output_name = 'text'
+
+                    res = trainer.test_fa()
+
+                    del trainer.fi_text_encoder
+                    trainer.fi_text_encoder = None
+                    del fi_text_encoder
+
+
                 if args.fi_both:
                     fi_image_encoder = MRFI(copy.deepcopy(image_encoder), econfig)
-                    fi_text_encoder = MRFI(copy.deepcopy(text_encoder), econfig)
                     trainer.fi_image_encoder = fi_image_encoder
+
+                    econfig = EasyConfig.load_file('easyconfigs/float_weight_fi.yaml')
+                    econfig.faultinject[0]['selector']['rate'] = ber
+
+                    fi_text_encoder = MRFI(copy.deepcopy(text_encoder), econfig)
                     trainer.fi_text_encoder = fi_text_encoder
+
                     output_name = 'both'
+
+                    res = trainer.test_fa()
+
+                    del trainer.fi_image_encoder
+                    trainer.fi_image_encoder = None
+                    del fi_image_encoder
+                    
+                    del trainer.fi_text_encoder
+                    trainer.fi_text_encoder = None
+                    del fi_text_encoder
+
+
                 
-                print(f'bit error rate: {ber}')
-                res = trainer.test_fa()
+
                 results.append((ber, res))
                 # save fi results to csv
                 df = pd.DataFrame(results, columns=['ber', 'acc'])
-                df.to_csv(f'resilience_component_wise_{output_name}.csv', index=False)
+                df.to_csv(f'{output_dir}/resilience_component_wise_{output_name}.csv', index=False)
+
+                torch.cuda.empty_cache()
+                gc.collect()
+                time.sleep(5)
+
+                
 
 
 
@@ -241,7 +289,7 @@ def main(args):
                         res = trainer.test_fa()
                         results.append((ber, layer, res))
                         df = pd.DataFrame(results, columns=['ber', 'layer', 'acc'])
-                        df.to_csv(f'resilience_layer_wise_image.csv', index=False)
+                        df.to_csv(f'{output_dir}/resilience_layer_wise_image.csv', index=False)
 
 
                 
@@ -268,7 +316,7 @@ def main(args):
                         res = trainer.test_fa()
                         results.append((ber, layer, res))
                         df = pd.DataFrame(results, columns=['ber', 'layer', 'acc'])
-                        df.to_csv(f'resilience_layer_wise_text.csv', index=False)
+                        df.to_csv(f'{output_dir}/resilience_layer_wise_text.csv', index=False)
 
         # bit -wise fault injection
         if args.fi_bit_wise:
@@ -293,7 +341,7 @@ def main(args):
                         res = trainer.test_fa()
                         results.append((ber, bit, res))
                         df = pd.DataFrame(results, columns=['ber', 'bit', 'acc'])
-                        df.to_csv(f'resilience_bit_wise_image.csv', index=False)
+                        df.to_csv(f'{output_dir}/resilience_bit_wise_image.csv', index=False)
                 
                 if args.fi_text_encoder:
                     for bit in range(32):
@@ -306,14 +354,7 @@ def main(args):
                         res = trainer.test_fa()
                         results.append((ber, bit, res))
                         df = pd.DataFrame(results, columns=['ber', 'bit', 'acc'])
-                        df.to_csv(f'resilience_bit_wise_text.csv', index=False)
-
-
-
-
-
-
-
+                        df.to_csv(f'{output_dir}/resilience_bit_wise_text.csv', index=False)
             
         return
 
@@ -398,7 +439,7 @@ if __name__ == "__main__":
 
 
 
-    parser.add_argument("--output-dir", type=str, default="", help="output directory")
+    parser.add_argument("--output_dir", type=str, default="", help="output directory")
     parser.add_argument(
         "--resume",
         type=str,

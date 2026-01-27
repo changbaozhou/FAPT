@@ -2,7 +2,7 @@
 # custom config
 # ROOT="/vhome/user/dataset"
 ROOT="/home/bobzhou/dataset"
-TRAINER=FAPT
+TRAINER=ZeroshotCLIP
 # TRAINER=FAPT
 # oxford_flowers, oxford_pets, imagenet, food101, sun397, dtd, eurosat, ucf101
 DATASET=oxford_flowers
@@ -16,42 +16,46 @@ CSC=False  # class-specific context (False or True)
 D=$ROOT
 SEED=1
 
-# DIR=/home/bobzhou/FAPT/results/${DATASET}/${TRAINER}/${CFG}/fapt
-# echo "--------------------------------------------------------------------------------------"
-# python train_fapt.py \
-# --root ${D} \
-# --fa_training \
-# --seed ${SEED} \
-# --trainer ${TRAINER} \
-# --dataset-config-file configs/datasets/${DATASET}.yaml \
-# --config-file configs/trainers/${TRAINER}/${CFG}.yaml \
-# --output-dir ${DIR} \
-# --model-dir ${DIR} \
-
 
 DIR=/home/bobzhou/FAPT/results/${DATASET}/${TRAINER}/${CFG}/zeroshot
 echo "--------------------------------------------------------------------------------------"
 python train_fapt.py \
 --root ${D} \
 --eval_fault \
+--fi_component_wise \
 --fi_image_encoder \
 --seed ${SEED} \
 --trainer ${TRAINER} \
 --dataset-config-file configs/datasets/${DATASET}.yaml \
 --config-file configs/trainers/${TRAINER}/${CFG}.yaml \
---output-dir ${DIR} \
+--output_dir ${DIR} \
 --model-dir ${DIR} \
 
-
-
-
+# DIR=/home/bobzhou/FAPT/results/${DATASET}/${TRAINER}/${CFG}/zeroshot
 # echo "--------------------------------------------------------------------------------------"
-# echo "zero shot"
-# TRAINER=ZeroshotCLIP
-# python train.py \
+# python train_fapt.py \
 # --root ${D} \
+# --eval_fault \
+# --fi_component_wise \
+# --fi_text_encoder \
+# --seed ${SEED} \
 # --trainer ${TRAINER} \
 # --dataset-config-file configs/datasets/${DATASET}.yaml \
-# --config-file configs/trainers/AdvPT/${CFG}.yaml \
-# --output-dir output/${TRAINER}/${CFG}/${DATASET} \
-# --eval-only
+# --config-file configs/trainers/${TRAINER}/${CFG}.yaml \
+# --output_dir ${DIR} \
+# --model-dir ${DIR} \
+
+
+# DIR=/home/bobzhou/FAPT/results/${DATASET}/${TRAINER}/${CFG}/zeroshot
+# echo "--------------------------------------------------------------------------------------"
+# python train_fapt.py \
+# --root ${D} \
+# --eval_fault \
+# --fi_component_wise \
+# --fi_both \
+# --seed ${SEED} \
+# --trainer ${TRAINER} \
+# --dataset-config-file configs/datasets/${DATASET}.yaml \
+# --config-file configs/trainers/${TRAINER}/${CFG}.yaml \
+# --output_dir ${DIR} \
+# --model-dir ${DIR} \
